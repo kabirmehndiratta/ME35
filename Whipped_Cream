@@ -1,0 +1,145 @@
+import RPi.GPIO as GPIO
+import time
+import airtable_module as airtable
+
+STATION = "whipped cream"
+
+GPIO.setmode(GPIO.BCM)
+GPIO.setwarnings(False)
+
+# ── SHAKE (Stepper) ──────────────────────────────────────────────────────────
+
+OUT1 = 18
+OUT2 = 17
+OUT3 = 27
+OUT4 = 22
+
+stepper_pins = [OUT1, OUT2, OUT3, OUT4]
+
+for pin in stepper_pins:
+    GPIO.setup(pin, GPIO.OUT)
+    GPIO.output(pin, 0)
+
+step_delay = 0.018
+
+sequence = [
+    (1, 0, 1, 0),
+    (0, 1, 1, 0),
+    (0, 1, 0, 1),
+    (1, 0, 0, 1),
+]
+
+def set_step(step):
+    for pin, value in zip(stepper_pins, step):
+        GPIO.output(pin, value)
+
+def step_cw(steps):
+    for _ in range(steps):
+        for step in sequence:
+            set_step(step)
+            time.sleep(step_delay)
+
+def step_ccw(steps):
+    for _ in range(steps):
+        for step in reversed(sequence):
+            set_step(step)
+            time.sleep(step_delay)
+
+# ── MOTOR ────────────────────────────────────────────────────────────────────
+
+ena = 25
+in1 = 8
+in2 = 7
+
+GPIO.setup(ena, GPIO.OUT)
+GPIO.setup(in1, GPIO.OUT)
+GPIO.setup(in2, GPIO.OUT)
+
+GPIO.output(ena, GPIO.LOW)
+GPIO.output(in1, GPIO.LOW)
+GPIO.output(in2, GPIO.LOW)
+
+motor1 = GPIO.PWM(ena, 50)
+motor1.start(0)
+
+# ── MAIN FUNCTION ────────────────────────────────────────────────────────────
+
+def run_whipped_cream_station():
+    # Shake
+    for _ in range(3):
+        step_cw(7)
+        time.sleep(0.01)
+        step_ccw(14)
+        time.sleep(0.01)
+        step_cw(14)
+        time.sleep(0.01)
+        step_ccw(7)
+        time.sleep(0.01)
+
+    for pin in stepper_pins:
+        GPIO.output(pin, 0)
+
+    time.sleep(1)
+
+    # Backward
+    GPIO.output(in1, GPIO.LOW)
+    GPIO.output(in2, GPIO.HIGH)
+    motor1.ChangeDutyCycle(50)
+    time.sleep(0.6)
+
+    # Pause
+    motor1.ChangeDutyCycle(0)
+    GPIO.output(in1, GPIO.LOW)
+    GPIO.output(in2, GPIO.LOW)
+    time.sleep(0.5)
+
+    # Forward
+    GPIO.output(in1, GPIO.HIGH)
+    GPIO.output(in2, GPIO.LOW)
+    motor1.ChangeDutyCycle(75)
+    time.sleep(0.6)
+
+    # Pause
+    motor1.ChangeDutyCycle(0)
+    GPIO.output(in1, GPIO.LOW)
+    GPIO.output(in2, GPIO.LOW)
+    time.sleep(1)
+
+# ── MAIN LOOP ────────────────────────────────────────────────────────────────
+
+try:
+    while True:
+        print("Waiting for Airtable: 0s")
+        elapsed = 0
+
+        while True:
+            status = airtable.get_status(STATION)
+
+            if status == "ready":
+                break
+
+            time.sleep(1)
+            elapsed += 1
+
+            if elapsed % 10 == 0:
+                print(f"Waiting for Airtable: {elapsed}s")
+
+        airtable.update_status(STATION, "executing")
+        print("Running whipped cream station...")
+
+        run_whipped_cream_station()
+
+        airtable.update_status(STATION, "success")
+        print("Cycle complete, restarting...\n")
+
+except KeyboardInterrupt:
+    print("Stopped")
+    airtable.update_status(STATION, "failure")
+
+except Exception as e:
+    print(f"Error: {e}")
+    airtable.update_status(STATION, "failure")
+
+finally:
+    motor1.stop()
+    GPIO.cleanup()
