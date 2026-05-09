@@ -1,0 +1,345 @@
+import rclpy
+from rclpy.node import Node
+from geometry_msgs.msg import Twist
+from nav_msgs.msg import Odometry
+from rclpy.qos import QoSProfile, ReliabilityPolicy
+from irobot_create_msgs.action import Undock
+from irobot_create_msgs.srv import ResetPose
+from rclpy.action import ActionClient
+import math
+import time
+import RPi.GPIO as GPIO
+import cv2
+import numpy as np
+from PIL import Image, ImageOps
+from keras.models import load_model
+from picamera2 import Picamera2
+
+# ── CAMERA + MODEL ───────────────────────────────────────────────────────────
+
+model = load_model("keras_model.h5", compile=False)
+class_names = open("labels.txt", "r").readlines()
+
+picam2 = Picamera2()
+config = picam2.create_preview_configuration(
+    main={"size": (640, 480), "format": "RGB888"}
+)
+picam2.configure(config)
+picam2.start()
+time.sleep(1)
+
+
+def scan_character():
+    print("Scanning object...")
+    votes = {}
+
+    for i in range(10):
+        image = picam2.capture_array("main")
+
+        cv2.imshow("Live Camera", image)
+        cv2.waitKey(1)
+
+        pil_image = Image.fromarray(image)
+        pil_image = ImageOps.fit(pil_image, (224, 224), Image.Resampling.LANCZOS)
+
+        input_image = np.asarray(pil_image, dtype=np.float32)
+        input_image = (input_image / 127.5) - 1
+        input_image = input_image.reshape(1, 224, 224, 3)
+
+        prediction = model.predict(input_image, verbose=0)
+        index = np.argmax(prediction)
+        label = class_names[index][2:].strip()
+        confidence = prediction[0][index]
+
+        print(f"Frame {i+1}: {label} ({confidence*100:.1f}%)")
+
+        if label not in votes:
+            votes[label] = 0
+        votes[label] += 1
+
+        time.sleep(0.1)
+
+    result = max(votes, key=votes.get)
+    print("FINAL DETECTED:", result)
+    return result
+
+
+# ── GRIPPER PIN CONFIG ───────────────────────────────────────────────────────
+
+ENA1 = 15
+IN1_1 = 16
+IN2_1 = 18
+ENA2 = 32
+IN1_2 = 36
+IN2_2 = 38
+
+PWM_FREQ = 30
+ARM_SPEED = 40
+CLAW_SPEED = 40
+ARM_UP_TIME = 0.7
+ARM_DOWN_TIME = 0.09
+CLAW_TIME = 0.4
+
+# ── GRIPPER SETUP ────────────────────────────────────────────────────────────
+
+GPIO.setmode(GPIO.BOARD)
+GPIO.setup(ENA1, GPIO.OUT)
+GPIO.setup(IN1_1, GPIO.OUT)
+GPIO.setup(IN2_1, GPIO.OUT)
+GPIO.setup(ENA2, GPIO.OUT)
+GPIO.setup(IN1_2, GPIO.OUT)
+GPIO.setup(IN2_2, GPIO.OUT)
+
+motor1 = GPIO.PWM(ENA1, PWM_FREQ)
+motor2 = GPIO.PWM(ENA2, PWM_FREQ)
+motor1.start(0)
+motor2.start(0)
+
+# ── GRIPPER FUNCTIONS ────────────────────────────────────────────────────────
+
+def close_claw():
+    print("Closing claw...")
+    GPIO.output(IN1_2, GPIO.LOW)
+    GPIO.output(IN2_2, GPIO.HIGH)
+    motor2.ChangeDutyCycle(CLAW_SPEED)
+    time.sleep(CLAW_TIME)
+    motor2.ChangeDutyCycle(0)
+    print("Claw closed")
+
+
+def open_claw():
+    print("Opening claw...")
+    GPIO.output(IN1_2, GPIO.HIGH)
+    GPIO.output(IN2_2, GPIO.LOW)
+    motor2.ChangeDutyCycle(CLAW_SPEED)
+    time.sleep(CLAW_TIME)
+    motor2.ChangeDutyCycle(0)
+    print("Claw opened")
+
+
+def arm_up():
+    print("Raising arm...")
+    GPIO.output(IN1_1, GPIO.LOW)
+    GPIO.output(IN2_1, GPIO.HIGH)
+    motor1.ChangeDutyCycle(ARM_SPEED)
+    time.sleep(ARM_UP_TIME)
+    motor1.ChangeDutyCycle(0)
+    print("Arm raised")
+
+
+def arm_down():
+    print("Lowering arm...")
+    GPIO.output(IN1_1, GPIO.HIGH)
+    GPIO.output(IN2_1, GPIO.LOW)
+    motor1.ChangeDutyCycle(ARM_SPEED)
+    time.sleep(ARM_DOWN_TIME)
+    motor1.ChangeDutyCycle(0)
+    print("Arm lowered")
+
+
+# ── DRIVE NODE ───────────────────────────────────────────────────────────────
+
+class DriveNode(Node):
+    def __init__(self):
+        super().__init__('airtable_drive')
+        qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.BEST_EFFORT)
+
+        self.odom_sub = self.create_subscription(
+            Odometry, '/odom', self.odom_callback, qos
+        )
+        self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
+        self.undock_client = ActionClient(self, Undock, '/undock')
+        self.reset_pose_client = self.create_client(ResetPose, '/reset_pose')
+
+        self.x = 0.0
+        self.y = 0.0
+        self.yaw = 0.0
+        self.odom_ready = False
+
+    def odom_callback(self, msg):
+        self.x = msg.pose.pose.position.x
+        self.y = msg.pose.pose.position.y
+        q = msg.pose.pose.orientation
+        siny = 2 * (q.w * q.z + q.x * q.y)
+        cosy = 1 - 2 * (q.y * q.y + q.z * q.z)
+        self.yaw = math.atan2(siny, cosy)
+        self.odom_ready = True
+
+    def stop(self):
+        self.cmd_pub.publish(Twist())
+        time.sleep(0.3)
+
+    def reset_pose(self):
+        print("Waiting for /reset_pose service...")
+        self.reset_pose_client.wait_for_service(timeout_sec=5.0)
+        request = ResetPose.Request()
+        future = self.reset_pose_client.call_async(request)
+        while not future.done():
+            rclpy.spin_once(self, timeout_sec=0.1)
+        self.x = 0.0
+        self.y = 0.0
+        self.yaw = 0.0
+        print("Pose reset complete — origin is now (0,0), yaw = 0")
+
+    def drive_distance(self, distance):
+        last_time = self.get_clock().now()
+        while (self.get_clock().now() - last_time).nanoseconds < 3e8:
+            rclpy.spin_once(self, timeout_sec=0.1)
+
+        start_x = self.x
+        start_y = self.y
+        twist = Twist()
+        twist.linear.x = 0.2
+        print(f"Driving {distance} meters")
+
+        while True:
+            dx = self.x - start_x
+            dy = self.y - start_y
+            traveled = math.sqrt(dx * dx + dy * dy)
+            if traveled >= distance:
+                break
+            self.cmd_pub.publish(twist)
+            rclpy.spin_once(self, timeout_sec=0.1)
+
+        self.stop()
+        print("Drive complete")
+
+    def turn_angle(self, angle):
+        target = self.yaw + angle
+        target = (target + math.pi) % (2 * math.pi) - math.pi
+        twist = Twist()
+        print(f"Turning {math.degrees(angle):.1f} degrees")
+
+        while True:
+            remaining = (target - self.yaw + math.pi) % (2 * math.pi) - math.pi
+            if abs(remaining) < 0.02:
+                break
+            twist.angular.z = max(-0.6, min(0.6, remaining * 2.0))
+            self.cmd_pub.publish(twist)
+            rclpy.spin_once(self, timeout_sec=0.1)
+
+        self.stop()
+        print("Turn complete")
+
+    def undock(self):
+        print("Waiting for undock server...")
+        self.undock_client.wait_for_server()
+        goal = Undock.Goal()
+        future = self.undock_client.send_goal_async(goal)
+        rclpy.spin_until_future_complete(self, future)
+        print("Undock command sent")
+        time.sleep(5)
+
+        print("Lowering arm to ground...")
+        GPIO.output(IN1_1, GPIO.HIGH)
+        GPIO.output(IN2_1, GPIO.LOW)
+        motor1.ChangeDutyCycle(ARM_SPEED)
+        time.sleep(0.4)
+        motor1.ChangeDutyCycle(0)
+        print("Arm lowered to ground")
+
+    def goToMiddle(self):
+        print("Returning to middle line...")
+        self.turn_angle(math.pi)
+        self.drive_distance(1.0)
+        print("Returned to middle")
+
+
+# ── MAIN ─────────────────────────────────────────────────────────────────────
+
+def main():
+    rclpy.init()
+    node = DriveNode()
+
+    pickup_location = None
+    while pickup_location not in ["L1", "L2"]:
+        pickup_location = input("Enter pickup location (L1 or L2): ").strip().upper()
+        if pickup_location not in ["L1", "L2"]:
+            print("Invalid input. Please enter L1 or L2.")
+
+    print("Waiting for odometry...")
+    while not node.odom_ready:
+        rclpy.spin_once(node, timeout_sec=0.1)
+
+    try:
+        # Undock
+        node.undock()
+
+        # Reset pose
+        node.reset_pose()
+
+        # Drive to pickup
+        if pickup_location == "L1":
+            node.drive_distance(1.0)
+        elif pickup_location == "L2":
+            node.drive_distance(2.0)
+            node.turn_angle(math.pi / 2)
+            node.drive_distance(1.0)
+
+        print("Reached pickup point:", pickup_location)
+
+        # Scan character
+        character = scan_character().lower()
+
+        # Pickup
+        close_claw()
+        arm_up()
+
+        # Return to middle
+        node.goToMiddle()
+
+        # Choose drop-off from scan
+        if character == "dustin":
+            R_target = "R1"
+        elif character == "will":
+            R_target = "R2"
+        else:
+            print("Unknown character detected. Defaulting to R1.")
+            R_target = "R1"
+
+        print("Scanned:", character)
+        print("Going to drop-off:", R_target)
+
+        # Drive to drop-off
+        if pickup_location == "L1" and R_target == "R2":
+            node.turn_angle(math.pi / 2)
+            node.drive_distance(1.0)
+            node.turn_angle(-math.pi / 2)
+            node.drive_distance(1.0)
+        elif pickup_location == "L1" and R_target == "R1":
+            node.drive_distance(1.0)
+        elif pickup_location == "L2" and R_target == "R1":
+            node.turn_angle(-math.pi / 2)
+            node.drive_distance(1.0)
+            node.turn_angle(math.pi / 2)
+            node.drive_distance(1.0)
+        elif pickup_location == "L2" and R_target == "R2":
+            node.drive_distance(1.0)
+
+        print("Reached", R_target)
+
+        # Drop off
+        arm_down()
+        open_claw()
+        print("Mission complete")
+
+    except KeyboardInterrupt:
+        node.stop()
+
+    finally:
+        try:
+            cv2.destroyAllWindows()
+        except Exception:
+            pass
+        try:
+            picam2.stop()
+        except Exception:
+            pass
+        motor1.stop()
+        motor2.stop()
+        GPIO.cleanup()
+        rclpy.shutdown()
+
+
+if __name__ == '__main__':
+    main()
