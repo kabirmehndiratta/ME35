@@ -7,7 +7,7 @@ import time
 
 # ── CONFIGURATION ────────────────────────────────────────────────────────────
 
-AIRTABLE_TOKEN = "patYyY5KWH126i4XR.60fc315f967d792f414328169519897b16e30c4afe9d21bfce34bed4e511a222"
+AIRTABLE_TOKEN = "-------------------------"
 BASE_ID        = "appksHkFNC5HukuSa"
 TABLE_NAME     = "Table%201"
 RECORD_ID      = "reci06LoKPfkSZN0s"
