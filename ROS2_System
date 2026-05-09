@@ -1,0 +1,90 @@
+# robot_control_gui.py
+
+import tkinter as tk
+import requests
+import threading
+import time
+
+# ── CONFIGURATION ────────────────────────────────────────────────────────────
+
+AIRTABLE_TOKEN = "patYyY5KWH126i4XR.60fc315f967d792f414328169519897b16e30c4afe9d21bfce34bed4e511a222"
+BASE_ID        = "appksHkFNC5HukuSa"
+TABLE_NAME     = "Table%201"
+RECORD_ID      = "reci06LoKPfkSZN0s"
+
+URL     = f"https://api.airtable.com/v0/{BASE_ID}/{TABLE_NAME}/{RECORD_ID}"
+HEADERS = {
+    "Authorization": f"Bearer {AIRTABLE_TOKEN}",
+    "Content-Type": "application/json"
+}
+
+# ── GUI CLASS ────────────────────────────────────────────────────────────────
+
+class RobotControlGUI:
+    def __init__(self, root):
+        self.root    = root
+        self.root.title("Robot Control (Strings)")
+        self.root.geometry("300x400")
+
+        self.lin_x           = 0.0
+        self.ang_z           = 0.0
+        self.last_sent_state = (None, None)
+        self.running         = True
+
+        # UI
+        tk.Label(root, text="Airtable Controller", font=("Arial", 12, "bold")).pack(pady=10)
+
+        self.val_label = tk.Label(root, text="X: 0.0 | Z: 0.0", font=("Courier", 14))
+        self.val_label.pack(pady=10)
+
+        btn_frame = tk.Frame(root)
+        btn_frame.pack(pady=10)
+
+        tk.Button(btn_frame, text="FORWARD",  width=12, height=2,
+                  command=lambda: self.update_local( 1.0,  0.0)).grid(row=0, column=1, pady=5)
+        tk.Button(btn_frame, text="CCW",      width=12, height=2,
+                  command=lambda: self.update_local( 0.0,  1.0)).grid(row=1, column=0, padx=5)
+        tk.Button(btn_frame, text="STOP",     width=12, height=2, bg="#ff4444", fg="white",
+                  command=lambda: self.update_local( 0.0,  0.0)).grid(row=1, column=1)
+        tk.Button(btn_frame, text="CW",       width=12, height=2,
+                  command=lambda: self.update_local( 0.0, -1.0)).grid(row=1, column=2, padx=5)
+        tk.Button(btn_frame, text="BACKWARD", width=12, height=2,
+                  command=lambda: self.update_local(-1.0,  0.0)).grid(row=2, column=1, pady=5)
+
+        # Background sync thread
+        self.thread = threading.Thread(target=self.airtable_loop, daemon=True)
+        self.thread.start()
+
+    def update_local(self, x, z):
+        self.lin_x = float(x)
+        self.ang_z = float(z)
+        self.val_label.config(text=f"X: {self.lin_x} | Z: {self.ang_z}")
+
+    def airtable_loop(self):
+        while self.running:
+            current_state = (self.lin_x, self.ang_z)
+
+            if current_state != self.last_sent_state:
+                payload = {
+                    "fields": {
+                        "lin_x": str(self.lin_x),
+                        "ang_z": str(self.ang_z)
+                    }
+                }
+                try:
+                    response = requests.patch(URL, headers=HEADERS, json=payload, timeout=5)
+                    if response.status_code == 200:
+                        self.last_sent_state = current_state
+                        print(f"Successfully sent: {payload['fields']}")
+                    else:
+                        print(f"API error {response.status_code}: {response.text}")
+                except Exception as e:
+                    print(f"Network connection issue: {e}")
+
+            time.sleep(0.2)  # stay under Airtable's 5 requests/sec limit
+
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app  = RobotControlGUI(root)
+    root.mainloop()
