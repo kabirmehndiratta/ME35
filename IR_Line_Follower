@@ -1,0 +1,107 @@
+import RPi.GPIO as GPIO
+import time
+
+GPIO.setmode(GPIO.BOARD)
+
+# ── MOTOR PIN CONFIG ─────────────────────────────────────────────────────────
+
+DC1A = 8
+DC1B = 7
+ENA  = 22
+DC2A = 10
+DC2B = 12
+ENB  = 24
+
+motor_pins = [DC1A, DC1B, DC2A, DC2B, ENA, ENB]
+for pin in motor_pins:
+    GPIO.setup(pin, GPIO.OUT)
+    GPIO.output(pin, GPIO.LOW)
+
+motorright = GPIO.PWM(ENA, 50)
+motorleft  = GPIO.PWM(ENB, 50)
+
+# ── SENSOR CONFIG ────────────────────────────────────────────────────────────
+
+sensors = [11, 13, 15, 16, 18, 19, 21]
+for pin in sensors:
+    GPIO.setup(pin, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
+
+# Outer sensors weighted more than inner
+weights = [-10, -6, -0.5, 0, 0.5, 6, 10]
+
+# ── PID CONFIG ───────────────────────────────────────────────────────────────
+
+KP = 6
+KI = 0.1
+KD = 3
+
+last_error = 0
+integral   = 0
+
+# ── MOTOR STARTUP ────────────────────────────────────────────────────────────
+
+speeddiff   = 0
+BaseSpeed   = 20
+BaseSpeedR  = BaseSpeed + speeddiff
+BaseSpeedL  = BaseSpeed
+
+GPIO.output(DC1B, GPIO.HIGH)
+GPIO.output(DC2B, GPIO.HIGH)
+motorright.start(BaseSpeedR)
+motorleft.start(BaseSpeedL)
+
+# ── MAIN LOOP ────────────────────────────────────────────────────────────────
+
+try:
+    while True:
+        total       = 0
+        sensors_on  = 0
+
+        for i in range(7):
+            if GPIO.input(sensors[i]) == 1:
+                total      += weights[i]
+                sensors_on += 1
+
+        if sensors_on == 0:
+            error = last_error  # lost line — keep turning same direction
+        else:
+            error = total / sensors_on
+
+        # PID
+        integral   += error
+        derivative  = error - last_error
+        correction  = KP * error + KI * integral + KD * derivative
+        last_error  = error
+
+        print(correction)
+
+        right_speed = max(-100, min(100, BaseSpeedR + correction))
+        left_speed  = max(-100, min(100, BaseSpeedL - correction))
+
+        # Right motor direction
+        if right_speed >= 0:
+            GPIO.output(DC1A, GPIO.LOW)
+            GPIO.output(DC1B, GPIO.HIGH)
+        else:
+            GPIO.output(DC1A, GPIO.HIGH)
+            GPIO.output(DC1B, GPIO.LOW)
+        motorright.ChangeDutyCycle(abs(right_speed))
+
+        # Left motor direction
+        if left_speed >= 0:
+            GPIO.output(DC2A, GPIO.LOW)
+            GPIO.output(DC2B, GPIO.HIGH)
+        else:
+            GPIO.output(DC2A, GPIO.HIGH)
+            GPIO.output(DC2B, GPIO.LOW)
+        motorleft.ChangeDutyCycle(abs(left_speed))
+
+        time.sleep(0.02)
+
+except KeyboardInterrupt:
+    print("\nExiting Program")
+
+finally:
+    motorright.stop()
+    motorleft.stop()
+    GPIO.cleanup()
