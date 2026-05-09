@@ -1,0 +1,241 @@
+# MarbleSort.py
+# Authors: Ryder Want and Kabir Mehndiratta
+
+import time
+import math
+import RPi.GPIO as GPIO
+
+# ── COLOR CALIBRATION ────────────────────────────────────────────────────────
+# Set these manually from colorSensorCalibrate.py output
+
+redCal    = [1743,  973, 1315]
+greenCal  = [1328, 2224, 1680]
+blueCal   = [1038, 2142, 4069]
+yellowCal = [5758, 4430, 2905]
+
+# ── GPIO SETUP ───────────────────────────────────────────────────────────────
+
+GPIO.setmode(GPIO.BOARD)
+GPIO.setwarnings(False)
+
+# ── COLOR STEPPER PINS ───────────────────────────────────────────────────────
+
+OUT1 = 36
+OUT2 = 32
+OUT3 = 26
+OUT4 = 24
+
+color_pins = [OUT1, OUT2, OUT3, OUT4]
+for pin in color_pins:
+    GPIO.setup(pin, GPIO.OUT)
+    GPIO.output(pin, GPIO.LOW)
+
+stepDelay  = 0.03
+pauseColor = 1
+
+currentPosition = 0  # 0=0°, 1=90°, 2=180°, 3=270°
+colorTurnCount  = 0  # for alternating 51/52 steps
+
+
+def stepMotor(currentStep):
+    if currentStep == 0:
+        GPIO.output(OUT1, GPIO.HIGH)
+        GPIO.output(OUT2, GPIO.LOW)
+        GPIO.output(OUT3, GPIO.HIGH)
+        GPIO.output(OUT4, GPIO.LOW)
+    elif currentStep == 1:
+        GPIO.output(OUT1, GPIO.LOW)
+        GPIO.output(OUT2, GPIO.HIGH)
+        GPIO.output(OUT3, GPIO.HIGH)
+        GPIO.output(OUT4, GPIO.LOW)
+    elif currentStep == 2:
+        GPIO.output(OUT1, GPIO.LOW)
+        GPIO.output(OUT2, GPIO.HIGH)
+        GPIO.output(OUT3, GPIO.LOW)
+        GPIO.output(OUT4, GPIO.HIGH)
+    elif currentStep == 3:
+        GPIO.output(OUT1, GPIO.HIGH)
+        GPIO.output(OUT2, GPIO.LOW)
+        GPIO.output(OUT3, GPIO.LOW)
+        GPIO.output(OUT4, GPIO.HIGH)
+
+
+def rotateToColor(color):
+    global currentPosition, colorTurnCount
+    print("Rotating to", color)
+
+    targetPos = color % 4
+    delta = targetPos - currentPosition
+
+    if delta > 2:
+        delta -= 4
+    elif delta < -2:
+        delta += 4
+
+    direction = 1 if delta > 0 else -1
+    turns     = abs(delta)
+    currentStep = 3
+
+    for _ in range(turns):
+        numSteps = 51 if colorTurnCount % 2 == 0 else 52
+        colorTurnCount += 1
+
+        for _ in range(numSteps):
+            stepMotor(currentStep)
+            time.sleep(stepDelay)
+
+            if direction == 1:  # clockwise
+                currentStep = 3 if currentStep == 0 else currentStep - 1
+            else:               # counter-clockwise
+                currentStep = 0 if currentStep == 3 else currentStep + 1
+
+    currentPosition = targetPos
+    time.sleep(pauseColor)
+
+
+# ── QUARTER TURN STEPPER PINS ────────────────────────────────────────────────
+
+OUT5 = 12
+OUT6 = 11
+OUT7 = 40
+OUT8 = 38
+
+quarter_pins = [OUT5, OUT6, OUT7, OUT8]
+for pin in quarter_pins:
+    GPIO.setup(pin, GPIO.OUT)
+    GPIO.output(pin, GPIO.LOW)
+
+pauseTime = 1
+turnCount = 0
+
+
+def quarterTurn():
+    global turnCount
+
+    numSteps = 51 if turnCount % 2 == 0 else 52
+    turnCount += 1
+
+    currentStep = 3
+
+    for _ in range(numSteps):
+        if currentStep == 0:
+            GPIO.output(OUT5, GPIO.HIGH)
+            GPIO.output(OUT6, GPIO.LOW)
+            GPIO.output(OUT7, GPIO.HIGH)
+            GPIO.output(OUT8, GPIO.LOW)
+        elif currentStep == 1:
+            GPIO.output(OUT5, GPIO.LOW)
+            GPIO.output(OUT6, GPIO.HIGH)
+            GPIO.output(OUT7, GPIO.HIGH)
+            GPIO.output(OUT8, GPIO.LOW)
+        elif currentStep == 2:
+            GPIO.output(OUT5, GPIO.LOW)
+            GPIO.output(OUT6, GPIO.HIGH)
+            GPIO.output(OUT7, GPIO.LOW)
+            GPIO.output(OUT8, GPIO.HIGH)
+        elif currentStep == 3:
+            GPIO.output(OUT5, GPIO.HIGH)
+            GPIO.output(OUT6, GPIO.LOW)
+            GPIO.output(OUT7, GPIO.LOW)
+            GPIO.output(OUT8, GPIO.HIGH)
+
+        time.sleep(stepDelay)
+        currentStep = 3 if currentStep == 0 else currentStep - 1
+
+
+# ── COLOR SENSOR PINS ────────────────────────────────────────────────────────
+
+s0  = 13
+s1  = 15
+s2  = 16
+s3  = 18
+sig = 22  # labeled "out" on board
+
+cycles = 10
+
+GPIO.setup(s0,  GPIO.OUT)
+GPIO.setup(s1,  GPIO.OUT)
+GPIO.setup(s2,  GPIO.OUT)
+GPIO.setup(s3,  GPIO.OUT)
+GPIO.setup(sig, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
+
+GPIO.output(s0, GPIO.HIGH)
+GPIO.output(s1, GPIO.LOW)
+
+
+def DetectColor():
+    # Red
+    GPIO.output(s2, GPIO.LOW)
+    GPIO.output(s3, GPIO.LOW)
+    time.sleep(0.1)
+    start_time = time.time()
+    for _ in range(cycles):
+        GPIO.wait_for_edge(sig, GPIO.FALLING)
+    red = cycles / (time.time() - start_time)
+    print("red value -", red)
+
+    # Blue
+    GPIO.output(s2, GPIO.LOW)
+    GPIO.output(s3, GPIO.HIGH)
+    time.sleep(0.1)
+    start_time = time.time()
+    for _ in range(cycles):
+        GPIO.wait_for_edge(sig, GPIO.FALLING)
+    blue = cycles / (time.time() - start_time)
+    print("blue value -", blue)
+
+    # Green
+    GPIO.output(s2, GPIO.HIGH)
+    GPIO.output(s3, GPIO.HIGH)
+    time.sleep(0.1)
+    start_time = time.time()
+    for _ in range(cycles):
+        GPIO.wait_for_edge(sig, GPIO.FALLING)
+    green = cycles / (time.time() - start_time)
+    print("green value -", green)
+
+    return [red, green, blue]
+
+
+def interpColors(redCal, greenCal, blueCal, yellowCal):
+    inColors = DetectColor()
+
+    def dist(cal):
+        return math.sqrt(sum((cal[i] - inColors[i]) ** 2 for i in range(3)))
+
+    redDist    = dist(redCal)
+    greenDist  = dist(greenCal)
+    blueDist   = dist(blueCal)
+    yellowDist = dist(yellowCal)
+
+    minimum = min(redDist, greenDist, blueDist, yellowDist)
+
+    if minimum == redDist:
+        print("It's red!")
+        return 0
+    elif minimum == greenDist:
+        print("It's green!")
+        return 1
+    elif minimum == blueDist:
+        print("It's blue!")
+        return 2
+    else:
+        print("It's yellow!")
+        return 3
+
+
+# ── MAIN LOOP ────────────────────────────────────────────────────────────────
+
+try:
+    while True:
+        quarterTurn()
+        color = interpColors(redCal, greenCal, blueCal, yellowCal)
+        time.sleep(1.5)
+        rotateToColor(color)
+        time.sleep(1)
+
+except KeyboardInterrupt:
+    print("Canceling and closing")
+
+finally:
+    GPIO.cleanup()
