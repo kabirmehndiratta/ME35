@@ -1,0 +1,185 @@
+# line_follower.py
+
+import cv2
+import numpy as np
+from picamera2 import Picamera2
+from libcamera import controls
+import RPi.GPIO as GPIO
+import time
+
+# ── CAMERA SETUP ─────────────────────────────────────────────────────────────
+
+picam2 = Picamera2()
+picam2.set_controls({"AfMode": controls.AfModeEnum.Continuous})
+picam2.start()
+time.sleep(1)
+
+# ── HSV COLOR REGISTRY ───────────────────────────────────────────────────────
+
+LINE_COLORS = {
+    "green":  {"lower": np.array([61,  153,  45]), "upper": np.array([74,  255, 255])},
+    "red":    {"lower": np.array([116, 179,  76]), "upper": np.array([129, 255, 255])},
+    "blue":   {"lower": np.array([5,   193,  56]), "upper": np.array([18,  255, 255])},
+    "purple": {"lower": np.array([160, 140,  44]), "upper": np.array([190, 185,  90])},
+    "black":  {"lower": np.array([0,    19,  17]), "upper": np.array([43,   79,  77])},
+    "pink":   {"lower": np.array([98,  118, 120]), "upper": np.array([158, 178, 180])},
+    "orange": {"lower": np.array([99,  245, 139]), "upper": np.array([120, 255, 188])},
+    "yellow": {"lower": np.array([86,  235, 146]), "upper": np.array([96,  245, 156])},
+}
+
+# ── COLOR SELECTION ──────────────────────────────────────────────────────────
+
+print("\nAvailable colors:", ", ".join(LINE_COLORS.keys()))
+while True:
+    current_line = input("Enter the color to follow: ").strip().lower()
+    if current_line in LINE_COLORS:
+        print(f"Following {current_line.upper()} line")
+        break
+    else:
+        print("Invalid color, try again")
+
+# ── GPIO SETUP ───────────────────────────────────────────────────────────────
+
+GPIO.setmode(GPIO.BOARD)
+
+ena, in1, in2 = 22, 24, 26
+enb, in3, in4 = 36, 38, 40
+
+motor_pins = [ena, in1, in2, enb, in3, in4]
+for pin in motor_pins:
+    GPIO.setup(pin, GPIO.OUT)
+    GPIO.output(pin, GPIO.LOW)
+
+left_motor  = GPIO.PWM(ena, 100)
+right_motor = GPIO.PWM(enb, 100)
+left_motor.start(0)
+right_motor.start(0)
+
+base_speed = 15
+max_speed  = 20
+
+# ── PID CONFIG ───────────────────────────────────────────────────────────────
+
+Kp = 12.0
+Kd = 8.0
+Ki = 0.0
+
+err_prev  = 0.0
+err_int   = 0.0
+last_time = time.time()
+
+
+def pid_control(error):
+    global err_prev, err_int, last_time
+
+    now  = time.time()
+    dt   = max(now - last_time, 0.01)
+    last_time = now
+
+    err_int += error * dt
+    err_int  = max(min(err_int, 0.5), -0.5)
+    err_dot  = (error - err_prev) / dt
+    err_prev = error
+
+    return Kp * error + Kd * err_dot + Ki * err_int
+
+# ── MOTOR CONTROL ────────────────────────────────────────────────────────────
+
+def motor_control(pid_output):
+    left_speed  = max(min(base_speed + pid_output, max_speed), 0)
+    right_speed = max(min(base_speed - pid_output, max_speed), 0)
+
+    GPIO.output(in1, GPIO.HIGH)
+    GPIO.output(in2, GPIO.LOW)
+    GPIO.output(in3, GPIO.HIGH)
+    GPIO.output(in4, GPIO.LOW)
+
+    left_motor.ChangeDutyCycle(left_speed)
+    right_motor.ChangeDutyCycle(right_speed)
+
+# ── LINE DETECTION ───────────────────────────────────────────────────────────
+
+def detect_line(hsv, color_name):
+    color    = LINE_COLORS[color_name]
+    mask     = cv2.inRange(hsv, color["lower"], color["upper"])
+    contours, _ = cv2.findContours(mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_NONE)
+    return mask, contours
+
+# ── RECOVERY ─────────────────────────────────────────────────────────────────
+
+direction = "left"
+
+
+def recovery():
+    global direction
+
+    spin_speed = 18
+
+    for _ in range(10):
+        image = picam2.capture_array("main")
+        crop  = image[60:700, 0:800]
+        hsv   = cv2.cvtColor(cv2.GaussianBlur(crop, (5, 5), 0), cv2.COLOR_BGR2HSV)
+        _, contours = detect_line(hsv, current_line)
+
+        if len(contours) > 0:
+            return
+
+        if direction == "left":
+            GPIO.output(in1, GPIO.LOW)
+            GPIO.output(in2, GPIO.HIGH)
+            GPIO.output(in3, GPIO.HIGH)
+            GPIO.output(in4, GPIO.LOW)
+        else:
+            GPIO.output(in1, GPIO.HIGH)
+            GPIO.output(in2, GPIO.LOW)
+            GPIO.output(in3, GPIO.LOW)
+            GPIO.output(in4, GPIO.HIGH)
+
+        left_motor.ChangeDutyCycle(spin_speed)
+        right_motor.ChangeDutyCycle(spin_speed)
+        time.sleep(0.1)
+
+        direction = "right" if direction == "left" else "left"
+
+# ── MAIN LOOP ────────────────────────────────────────────────────────────────
+
+try:
+    while True:
+        image = picam2.capture_array("main")
+        crop  = image[60:700, 0:800]
+        blur  = cv2.GaussianBlur(crop, (5, 5), 0)
+        hsv   = cv2.cvtColor(blur, cv2.COLOR_BGR2HSV)
+
+        mask, contours = detect_line(hsv, current_line)
+
+        if len(contours) > 0:
+            c = max(contours, key=cv2.contourArea)
+            M = cv2.moments(c)
+
+            if M["m00"] != 0:
+                cx       = int(M["m10"] / M["m00"])
+                target_x = crop.shape[1] // 2
+                error    = (cx - target_x) / target_x
+
+                pid_output = pid_control(error)
+                motor_control(pid_output)
+        else:
+            GPIO.output(in1, GPIO.LOW)
+            GPIO.output(in2, GPIO.LOW)
+            GPIO.output(in3, GPIO.LOW)
+            GPIO.output(in4, GPIO.LOW)
+            time.sleep(0.3)
+            recovery()
+
+        cv2.imshow("Mask", mask)
+        cv2.imshow("Crop", crop)
+        cv2.waitKey(1)
+
+except KeyboardInterrupt:
+    print("\nExiting program")
+
+finally:
+    left_motor.stop()
+    right_motor.stop()
+    GPIO.cleanup()
+    cv2.destroyAllWindows()
