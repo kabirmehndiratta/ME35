@@ -1,0 +1,53 @@
+# gripper_open.py
+
+import RPi.GPIO as GPIO
+import time
+
+GPIO.setmode(GPIO.BOARD)
+
+OUT1 = 12
+OUT2 = 11
+OUT3 = 13
+OUT4 = 15
+
+pins = [OUT1, OUT2, OUT3, OUT4]
+for pin in pins:
+    GPIO.setup(pin, GPIO.OUT)
+    GPIO.output(pin, GPIO.LOW)
+
+num_steps  = 20
+step_delay = 0.002
+
+try:
+    current_step = 3
+
+    for _ in range(num_steps):
+        if current_step == 3:
+            GPIO.output(OUT1, GPIO.HIGH)
+            GPIO.output(OUT2, GPIO.LOW)
+            GPIO.output(OUT3, GPIO.LOW)
+            GPIO.output(OUT4, GPIO.HIGH)
+        elif current_step == 2:
+            GPIO.output(OUT1, GPIO.LOW)
+            GPIO.output(OUT2, GPIO.HIGH)
+            GPIO.output(OUT3, GPIO.LOW)
+            GPIO.output(OUT4, GPIO.HIGH)
+        elif current_step == 1:
+            GPIO.output(OUT1, GPIO.LOW)
+            GPIO.output(OUT2, GPIO.HIGH)
+            GPIO.output(OUT3, GPIO.HIGH)
+            GPIO.output(OUT4, GPIO.LOW)
+        elif current_step == 0:
+            GPIO.output(OUT1, GPIO.HIGH)
+            GPIO.output(OUT2, GPIO.LOW)
+            GPIO.output(OUT3, GPIO.HIGH)
+            GPIO.output(OUT4, GPIO.LOW)
+
+        time.sleep(step_delay)
+        current_step = 3 if current_step == 0 else current_step - 1
+
+except KeyboardInterrupt:
+    pass
+
+finally:
+    GPIO.cleanup()
